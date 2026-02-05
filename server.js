@@ -28,6 +28,16 @@ app.use(
 
 app.use(express.json());
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    message: 'Tax Calculator API is running',
+    endpoint: '/api/calculate',
+    method: 'POST'
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
