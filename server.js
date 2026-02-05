@@ -7,7 +7,8 @@ const PORT = process.env.PORT || 3000;
 
 // CORS configuration - update with your Framer domain
 const allowedOrigins = [
-  'https://your-framer-site.framer.website',
+  'https://www.jai1taxes.com',
+  'https://jai1taxes.com',
   'http://localhost:3000',
   'http://localhost:5173', // Vite dev server
 ];
