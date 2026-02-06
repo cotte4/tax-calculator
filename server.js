@@ -1,21 +1,22 @@
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
+const express = require("express");
+const cors = require("cors");
+const multer = require("multer");
+require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // CORS configuration – calculator lives at https://www.jai1taxes.com/calculadora
 const allowedOrigins = [
-  'https://www.jai1taxes.com',  // production calculadora
-  'https://jai1taxes.com',
-  'http://localhost:3000',
-  'http://localhost:5173',     // Vite dev server
+  "https://www.jai1taxes.com", // production calculadora
+  "https://jai1taxes.com",
+  "http://localhost:3000",
+  "http://localhost:5173", // Vite dev server
 ];
 
 // Optional: extra origins from env (e.g. in Railway: ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com)
 if (process.env.ALLOWED_ORIGINS) {
-  process.env.ALLOWED_ORIGINS.split(',').forEach((o) => {
+  process.env.ALLOWED_ORIGINS.split(",").forEach((o) => {
     const trimmed = o.trim();
     if (trimmed) allowedOrigins.push(trimmed);
   });
@@ -28,127 +29,214 @@ app.use(
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       // Allow Railway preview URLs (e.g. https://xxx.up.railway.app)
-      if (origin.endsWith('.railway.app')) return callback(null, true);
-      callback(new Error('Not allowed by CORS'));
+      if (origin.endsWith(".railway.app")) return callback(null, true);
+      callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
-  })
+  }),
 );
 
 app.use(express.json());
 
+// Configure multer for file uploads (memory storage)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept images only
+    if (file.mimetype.startsWith("image/")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files are allowed"), false);
+    }
+  },
+});
+
 // Root endpoint
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    message: 'Tax Calculator API is running',
-    endpoint: '/api/calculate',
-    method: 'POST'
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Tax Calculator API is running",
+    endpoints: {
+      uploadW2: {
+        path: "/api/upload-w2",
+        method: "POST",
+        description: "Upload W-2 image to extract Box 2 and Box 17 values using OpenAI Vision",
+        contentType: "multipart/form-data",
+        field: "w2Image",
+      },
+      calculate: {
+        path: "/api/calculate",
+        method: "POST",
+        description: "Calculate refund from manually entered Box 2 and Box 17 values",
+        body: { box2Federal: "number", box17State: "number" },
+      },
+    },
   });
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
 });
 
-// Calculate endpoint
-app.post('/api/calculate', async (req, res) => {
-  try {
-    const { box2Federal, box17State } = req.body;
+// Helper function to calculate refund
+function calculateRefund(box2Federal, box17State) {
+  const totalWithheld = box2Federal + box17State;
+  // Estimate federal liability (~12% of withheld for J1 holders after deductions)
+  const estimatedFederalLiability = box2Federal * 0.12;
+  // Estimate state liability (~4% of withheld for J1 holders)
+  const estimatedStateLiability = box17State * 0.04;
+  // Calculate refund: withheld minus estimated liability
+  return Math.max(0, totalWithheld - estimatedFederalLiability - estimatedStateLiability);
+}
 
-    // Validate inputs
-    if (
-      typeof box2Federal !== 'number' ||
-      typeof box17State !== 'number' ||
-      !Number.isFinite(box2Federal) ||
-      !Number.isFinite(box17State) ||
-      box2Federal < 0 ||
-      box17State < 0
-    ) {
-      return res.status(400).json({ error: 'Invalid input values' });
+// W-2 upload and extraction endpoint
+app.post("/api/upload-w2", upload.single("w2Image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No image file provided" });
     }
 
-    // Get OpenAI API key from environment
     const openaiApiKey = process.env.OPENAI_API_KEY;
     if (!openaiApiKey) {
-      console.error('OPENAI_API_KEY is not set');
-      return res.status(500).json({ error: 'Server configuration error' });
+      return res.status(500).json({ error: "Server configuration error: OPENAI_API_KEY not set" });
     }
 
-    // Call OpenAI API with the cheapest model
+    // Convert image buffer to base64
+    const base64Image = req.file.buffer.toString("base64");
+    const mimeType = req.file.mimetype;
+
+    // Call OpenAI Vision API to extract W-2 values
     const openaiResponse = await fetch(
-      'https://api.openai.com/v1/chat/completions',
+      "https://api.openai.com/v1/chat/completions",
       {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
           Authorization: `Bearer ${openaiApiKey}`,
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini', // Cheapest model
+          model: "gpt-4o-mini", // Vision-capable model
           messages: [
             {
-              role: 'system',
+              role: "system",
               content:
-                'You are a tax refund calculator. Calculate the estimated refund based on federal and state tax amounts. Return only a JSON object with the estimated refund amount as a number. The refund is typically calculated as the difference between taxes withheld and taxes owed, but use standard tax calculation logic.',
+                "You are a W-2 form extractor. Extract the values from Box 2 (Federal income tax withheld) and Box 17 (State income tax withheld) from this W-2 form image. Return ONLY a JSON object with these exact fields: { \"box2Federal\": <number>, \"box17State\": <number> }. If a value is not found or cannot be read, use 0 for that field. Extract only numeric values, removing any dollar signs or commas.",
             },
             {
-              role: 'user',
-              content: `Calculate the estimated tax refund. Federal tax amount (Box 2): $${box2Federal}. State tax amount (Box 17): $${box17State}. Return a JSON object with: { "estimatedRefund": <number> }`,
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Extract Box 2 (Federal income tax withheld) and Box 17 (State income tax withheld) from this W-2 form. Return JSON with box2Federal and box17State as numbers.",
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${mimeType};base64,${base64Image}`,
+                  },
+                },
+              ],
             },
           ],
-          response_format: { type: 'json_object' },
-          temperature: 0.3,
-          max_tokens: 150,
+          response_format: { type: "json_object" },
+          temperature: 0.1,
+          max_tokens: 200,
         }),
       }
     );
 
     if (!openaiResponse.ok) {
       const errorData = await openaiResponse.text();
-      console.error('OpenAI API error:', errorData);
-      return res.status(500).json({ error: 'Failed to calculate estimate' });
+      console.error("OpenAI API error:", errorData);
+      return res.status(500).json({ error: "Failed to extract W-2 data" });
     }
 
     const openaiData = await openaiResponse.json();
     const content = openaiData.choices?.[0]?.message?.content;
 
     if (!content) {
-      return res.status(500).json({ error: 'Invalid response from AI' });
+      return res.status(500).json({ error: "Invalid response from AI" });
     }
 
-    // Parse the JSON response from OpenAI
-    let aiResult;
+    // Parse extracted values
+    let extractedData;
     try {
-      aiResult = JSON.parse(content);
-    } catch {
-      // Fallback: simple calculation if JSON parsing fails
-      const estimatedRefund =
-        box2Federal + box17State - (box2Federal * 0.1 + box17State * 0.05);
-      aiResult = { estimatedRefund: Math.max(0, estimatedRefund) };
+      extractedData = JSON.parse(content);
+    } catch (parseError) {
+      console.error("Failed to parse OpenAI response:", parseError);
+      return res.status(500).json({ error: "Failed to parse extracted data" });
     }
 
-    const estimatedRefund =
-      typeof aiResult.estimatedRefund === 'number'
-        ? aiResult.estimatedRefund
-        : Math.max(
-            0,
-            box2Federal + box17State - (box2Federal * 0.1 + box17State * 0.05)
-          );
+    const box2Federal = typeof extractedData.box2Federal === "number" 
+      ? extractedData.box2Federal 
+      : parseFloat(extractedData.box2Federal) || 0;
+    const box17State = typeof extractedData.box17State === "number"
+      ? extractedData.box17State
+      : parseFloat(extractedData.box17State) || 0;
+
+    // Validate extracted values
+    if (
+      !Number.isFinite(box2Federal) ||
+      !Number.isFinite(box17State) ||
+      box2Federal < 0 ||
+      box17State < 0
+    ) {
+      return res.status(400).json({ 
+        error: "Invalid values extracted from W-2",
+        extracted: extractedData 
+      });
+    }
+
+    // Calculate refund
+    const estimatedRefund = calculateRefund(box2Federal, box17State);
+
+    // Return response
+    return res.status(200).json({
+      box2Federal,
+      box17State,
+      estimatedRefund: Math.round(estimatedRefund * 100) / 100,
+      ocrConfidence: "ai-extracted",
+    });
+  } catch (error) {
+    console.error("Error in upload-w2 endpoint:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Calculate endpoint (for manual entry - no AI needed, just math)
+app.post("/api/calculate", (req, res) => {
+  try {
+    const { box2Federal, box17State } = req.body;
+
+    // Validate inputs
+    if (
+      typeof box2Federal !== "number" ||
+      typeof box17State !== "number" ||
+      !Number.isFinite(box2Federal) ||
+      !Number.isFinite(box17State) ||
+      box2Federal < 0 ||
+      box17State < 0
+    ) {
+      return res.status(400).json({ error: "Invalid input values" });
+    }
+
+    // Calculate refund using proper formula
+    const estimatedRefund = calculateRefund(box2Federal, box17State);
 
     // Return response in the expected format
-    const response = {
+    return res.status(200).json({
       box2Federal,
       box17State,
       estimatedRefund: Math.round(estimatedRefund * 100) / 100, // Round to 2 decimal places
-      ocrConfidence: 'manual',
-    };
-
-    return res.status(200).json(response);
+      ocrConfidence: "manual",
+    });
   } catch (error) {
-    console.error('Error in calculate endpoint:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error("Error in calculate endpoint:", error);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -157,4 +245,3 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`API endpoint: http://localhost:${PORT}/api/calculate`);
 });
-
