@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { addPropertyControls, ControlType } from 'framer';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
@@ -17,8 +18,8 @@ type CachedResult = EstimateResponse & {
 };
 
 type Props = {
-  apiBaseUrl: string;       // e.g. https://api.yourdomain.com
-  bearerToken?: string;     // optional auth token
+  apiBaseUrl: string;
+  bearerToken?: string;
 };
 
 /* ------------------------------------------------------------------ */
@@ -103,7 +104,6 @@ async function saveCachedFile(file: File): Promise<void> {
     await resetIfNewSession();
     const db = await openDB();
     if (!db) return;
-    // Store raw buffer + metadata so we can reconstruct a proper File later
     const buffer = await file.arrayBuffer();
     await new Promise<void>((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -128,7 +128,6 @@ async function loadCachedFile(): Promise<File | null> {
       req.onsuccess = () => {
         const data = req.result;
         if (!data?.buffer) { resolve(null); return; }
-        // Reconstruct a real File from the stored buffer + metadata
         const file = new File([data.buffer], data.name || 'w2.jpg', {
           type: data.type || 'image/jpeg',
           lastModified: data.lastModified || Date.now(),
@@ -143,6 +142,25 @@ async function loadCachedFile(): Promise<File | null> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Helper: parse error response from server                          */
+/* ------------------------------------------------------------------ */
+
+async function parseErrorResponse(response: Response): Promise<string> {
+  try {
+    const text = await response.text();
+    // Try parsing as JSON to extract the error message
+    try {
+      const json = JSON.parse(text);
+      if (json.error && typeof json.error === 'string') return json.error;
+      if (json.message && typeof json.message === 'string') return json.message;
+    } catch { /* not JSON, use raw text */ }
+    return text || 'Error al procesar tu W2.';
+  } catch {
+    return 'Error al procesar tu W2.';
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Component                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -153,7 +171,9 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<EstimateResponse | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [loadingStep, setLoadingStep] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const loadingInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Restore cached result and/or file on mount
   useEffect(() => {
@@ -174,7 +194,21 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
       .catch(() => {});
   }, []);
 
+  // Cleanup loading interval on unmount
+  useEffect(() => {
+    return () => {
+      if (loadingInterval.current) clearInterval(loadingInterval.current);
+    };
+  }, []);
+
   const canSubmit = useMemo(() => !!file && !loading, [file, loading]);
+
+  const loadingSteps = [
+    'Subiendo documento...',
+    'Analizando W2 con IA...',
+    'Extrayendo Box 2 y Box 17...',
+    'Calculando reembolso...',
+  ];
 
   /* ---- file selection ---- */
 
@@ -196,7 +230,7 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
     if (!validTypes.includes(nextFile.type)) {
       setFile(null);
       setPreviewUrl(null);
-      setError('Only JPG, PNG, and PDF files are allowed.');
+      setError('Solo se aceptan archivos JPG, PNG y PDF.');
       return;
     }
 
@@ -232,6 +266,26 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
     [previewUrl],
   );
 
+  /* ---- loading animation ---- */
+
+  function startLoadingAnimation() {
+    setLoadingStep(0);
+    let step = 0;
+    loadingInterval.current = setInterval(() => {
+      step += 1;
+      if (step < loadingSteps.length) {
+        setLoadingStep(step);
+      }
+    }, 2500);
+  }
+
+  function stopLoadingAnimation() {
+    if (loadingInterval.current) {
+      clearInterval(loadingInterval.current);
+      loadingInterval.current = null;
+    }
+  }
+
   /* ---- submit ---- */
 
   async function onCalculate() {
@@ -240,6 +294,7 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
     setLoading(true);
     setError(null);
     setResult(null);
+    startLoadingAnimation();
 
     try {
       const formData = new FormData();
@@ -260,8 +315,8 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
       );
 
       if (!response.ok) {
-        const txt = await response.text();
-        throw new Error(txt || 'Failed to process W2.');
+        const errorMsg = await parseErrorResponse(response);
+        throw new Error(errorMsg);
       }
 
       const data = (await response.json()) as EstimateResponse;
@@ -273,8 +328,9 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
         documentName: file.name,
       });
     } catch (e: any) {
-      setError(e?.message || 'Could not process W2 right now.');
+      setError(e?.message || 'No pudimos procesar tu W2 en este momento.');
     } finally {
+      stopLoadingAnimation();
       setLoading(false);
     }
   }
@@ -293,16 +349,61 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
   }
 
   /* ================================================================ */
+  /*  Render — Loading state                                          */
+  /* ================================================================ */
+
+  if (loading) {
+    return (
+      <div style={styles.card}>
+        <h3 style={styles.title}>Calculadora de Reembolso</h3>
+
+        <div style={styles.loadingContainer}>
+          {/* Spinner */}
+          <div style={styles.spinnerWrapper}>
+            <div style={styles.spinnerOuter} />
+            <div style={styles.spinnerInner} />
+            <span style={styles.spinnerIcon}>💰</span>
+          </div>
+
+          {/* AI badge */}
+          <div style={styles.aiBadge}>
+            <span>🤖</span>
+            <span style={{ fontWeight: 600 }}>Análisis con IA</span>
+          </div>
+
+          {/* Step text */}
+          <div style={styles.loadingStep}>
+            {loadingSteps[loadingStep] || loadingSteps[loadingSteps.length - 1]}
+          </div>
+
+          {/* Progress dots */}
+          <div style={styles.progressDots}>
+            {loadingSteps.map((_, i) => (
+              <div
+                key={i}
+                style={{
+                  ...styles.dot,
+                  ...(i <= loadingStep ? styles.dotActive : {}),
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ================================================================ */
   /*  Render — Result state                                           */
   /* ================================================================ */
 
-  if (result && !loading) {
+  if (result) {
     return (
       <div style={styles.card}>
-        <h3 style={styles.title}>Tax Refund Calculator</h3>
+        <h3 style={styles.title}>Calculadora de Reembolso</h3>
 
         <div style={styles.resultContainer}>
-          <div style={styles.refundLabel}>Estimated Refund</div>
+          <div style={styles.refundLabel}>Reembolso Estimado</div>
           <div style={styles.refundAmount}>${result.estimatedRefund.toFixed(2)}</div>
 
           {(result.box2Federal > 0 || result.box17State > 0) && (
@@ -312,20 +413,31 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
                 <span style={styles.breakdownValue}>${result.box2Federal.toFixed(2)}</span>
               </div>
               <div style={styles.breakdownRow}>
-                <span style={styles.breakdownLabel}>Box 17 (State)</span>
+                <span style={styles.breakdownLabel}>Box 17 (Estatal)</span>
                 <span style={styles.breakdownValue}>${result.box17State.toFixed(2)}</span>
               </div>
             </div>
           )}
 
+          {/* Status badges */}
+          <div style={styles.badges}>
+            <div style={styles.badge}>
+              <span>✓</span>
+              <span>W2 Procesado</span>
+            </div>
+            <div style={styles.badge}>
+              <span>🔒</span>
+              <span>Guardado localmente</span>
+            </div>
+          </div>
+
           <div style={styles.sessionNote}>
-            <span>🔒</span>
-            <span>Saved locally — clears when you close the browser.</span>
+            <span>Este cálculo está guardado localmente en este navegador y se borrará al finalizar la sesión.</span>
           </div>
         </div>
 
         <button type="button" onClick={resetCalculator} style={styles.resetButton}>
-          Calculate with another document
+          Calcular con otro documento
         </button>
       </div>
     );
@@ -337,9 +449,9 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
 
   return (
     <div style={styles.card}>
-      <h3 style={styles.title}>Tax Refund Calculator</h3>
+      <h3 style={styles.title}>Calculadora de Reembolso</h3>
       <p style={styles.subtitle}>
-        Upload your W-2 image and we'll extract Box 2 and Box 17 automatically.
+        Sube tu W-2 y extraeremos Box 2 y Box 17 automáticamente.
       </p>
 
       {/* Drop zone */}
@@ -362,7 +474,7 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
         />
 
         {previewUrl && file?.type.startsWith('image/') ? (
-          <img src={previewUrl} alt="W2 preview" style={styles.previewImage} />
+          <img src={previewUrl} alt="Vista previa W2" style={styles.previewImage} />
         ) : file ? (
           <div style={styles.fileInfo}>
             <span style={{ fontSize: 32 }}>📄</span>
@@ -371,9 +483,9 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
         ) : (
           <div style={styles.dropzoneContent}>
             <span style={{ fontSize: 32 }}>📤</span>
-            <span style={styles.dropzoneMain}>Drag your W2 here</span>
-            <span style={styles.dropzoneOr}>or</span>
-            <span style={styles.dropzoneBrowse}>click to browse</span>
+            <span style={styles.dropzoneMain}>Arrastra tu W2 aquí</span>
+            <span style={styles.dropzoneOr}>o</span>
+            <span style={styles.dropzoneBrowse}>haz clic para seleccionar</span>
             <div style={styles.formats}>
               <span style={styles.formatBadge}>JPG</span>
               <span style={styles.formatBadge}>PNG</span>
@@ -392,17 +504,56 @@ export default function W2CalculatorEmbed({ apiBaseUrl, bearerToken }: Props) {
           ...(canSubmit ? {} : styles.submitButtonDisabled),
         }}
       >
-        {loading ? 'Processing W-2…' : 'Calculate from W-2'}
+        Calcular desde W-2
       </button>
 
       {error && <p style={styles.errorText}>{error}</p>}
 
       <div style={styles.sessionNote}>
-        <span>🔒</span>
-        <span>Your information is stored locally for this session only.</span>
+        <span>🔒 Tu información se guarda localmente durante esta sesión y se elimina al cerrarla.</span>
       </div>
     </div>
   );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Framer Property Controls                                          */
+/* ------------------------------------------------------------------ */
+
+addPropertyControls(W2CalculatorEmbed, {
+  apiBaseUrl: {
+    type: ControlType.String,
+    title: 'API Base URL',
+    description: 'URL del backend en Railway (ej: https://tax-calculator-production.up.railway.app)',
+    defaultValue: '',
+  },
+  bearerToken: {
+    type: ControlType.String,
+    title: 'Bearer Token',
+    description: 'Token de autenticación (opcional)',
+    defaultValue: '',
+  },
+});
+
+/* ------------------------------------------------------------------ */
+/*  Keyframe animation (injected once)                                */
+/* ------------------------------------------------------------------ */
+
+const SPINNER_ID = 'jai1-spinner-keyframes';
+if (typeof document !== 'undefined' && !document.getElementById(SPINNER_ID)) {
+  const style = document.createElement('style');
+  style.id = SPINNER_ID;
+  style.textContent = `
+    @keyframes jai1-spin {
+      0%   { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    @keyframes jai1-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.7; transform: scale(1.08); }
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 /* ------------------------------------------------------------------ */
@@ -499,6 +650,73 @@ const styles: Record<string, React.CSSProperties> = {
   /* Error */
   errorText: { marginTop: 12, color: '#b91c1c', fontSize: 14 },
 
+  /* Loading */
+  loadingContainer: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    padding: '32px 0',
+    gap: 16,
+  },
+  spinnerWrapper: {
+    position: 'relative' as const,
+    width: 80,
+    height: 80,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  spinnerOuter: {
+    position: 'absolute' as const,
+    inset: 0,
+    borderRadius: '50%',
+    border: '3px solid #e5e7eb',
+    borderTopColor: '#111827',
+    animation: 'jai1-spin 1s linear infinite',
+  },
+  spinnerInner: {
+    position: 'absolute' as const,
+    inset: 8,
+    borderRadius: '50%',
+    border: '3px solid #e5e7eb',
+    borderTopColor: '#6b7280',
+    animation: 'jai1-spin 1.5s linear infinite reverse',
+  },
+  spinnerIcon: {
+    fontSize: 28,
+    animation: 'jai1-pulse 2s ease-in-out infinite',
+  },
+  aiBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '6px 14px',
+    background: 'rgba(17, 24, 39, 0.06)',
+    borderRadius: 20,
+    fontSize: 13,
+    color: '#111827',
+  },
+  loadingStep: {
+    fontSize: 15,
+    fontWeight: 500,
+    color: '#374151',
+    textAlign: 'center' as const,
+  },
+  progressDots: {
+    display: 'flex',
+    gap: 6,
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: '50%',
+    background: '#e5e7eb',
+    transition: 'background 0.3s',
+  },
+  dotActive: {
+    background: '#111827',
+  },
+
   /* Result */
   resultContainer: {
     marginTop: 8,
@@ -523,6 +741,23 @@ const styles: Record<string, React.CSSProperties> = {
   },
   breakdownLabel: { color: '#4b5563' },
   breakdownValue: { fontWeight: 600, color: '#111827' },
+  badges: {
+    display: 'flex',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 14,
+  },
+  badge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '4px 10px',
+    borderRadius: 20,
+    fontSize: 12,
+    fontWeight: 500,
+    background: 'rgba(22, 101, 52, 0.08)',
+    color: '#166534',
+  },
 
   /* Session note */
   sessionNote: {
@@ -533,6 +768,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: '#9ca3af',
     justifyContent: 'center',
+    textAlign: 'center' as const,
   },
 
   /* Reset */
