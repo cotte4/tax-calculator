@@ -5,22 +5,31 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS configuration - update with your Framer domain
+// CORS configuration – calculator lives at https://www.jai1taxes.com/calculadora
 const allowedOrigins = [
-  'https://www.jai1taxes.com',
+  'https://www.jai1taxes.com',  // production calculadora
   'https://jai1taxes.com',
   'http://localhost:3000',
-  'http://localhost:5173', // Vite dev server
+  'http://localhost:5173',     // Vite dev server
 ];
+
+// Optional: extra origins from env (e.g. in Railway: ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com)
+if (process.env.ALLOWED_ORIGINS) {
+  process.env.ALLOWED_ORIGINS.split(',').forEach((o) => {
+    const trimmed = o.trim();
+    if (trimmed) allowedOrigins.push(trimmed);
+  });
+}
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
+      // No origin = same-origin request, Postman, or server-to-server
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      // Allow Railway preview URLs (e.g. https://xxx.up.railway.app)
+      if (origin.endsWith('.railway.app')) return callback(null, true);
+      callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
   })
