@@ -87,15 +87,9 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Helper function to calculate refund
+// Helper function to calculate refund (Path A: simple sum)
 function calculateRefund(box2Federal, box17State) {
-  const totalWithheld = box2Federal + box17State;
-  // Estimate federal liability (~12% of withheld for J1 holders after deductions)
-  const estimatedFederalLiability = box2Federal * 0.12;
-  // Estimate state liability (~4% of withheld for J1 holders)
-  const estimatedStateLiability = box17State * 0.04;
-  // Calculate refund: withheld minus estimated liability
-  return Math.max(0, totalWithheld - estimatedFederalLiability - estimatedStateLiability);
+  return Math.max(0, box2Federal + box17State);
 }
 
 // W-2 upload and extraction endpoint
