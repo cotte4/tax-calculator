@@ -25,16 +25,21 @@ if (process.env.ALLOWED_ORIGINS) {
 app.use(
   cors({
     origin: (origin, callback) => {
-      // No origin = same-origin request, Postman, or server-to-server
       if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      // Allow Railway preview URLs (e.g. https://xxx.up.railway.app)
-      if (origin.endsWith(".railway.app")) return callback(null, true);
-      callback(new Error("Not allowed by CORS"));
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
-  }),
+  })
 );
+
+// ✅ REQUIRED for Railway + browser preflight
+app.options("*", cors());
+
 
 app.use(express.json());
 
